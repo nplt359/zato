@@ -161,6 +161,7 @@ class ParallelServer(BrokerMessageReceiver, ConfigLoader, HTTPHandler):
         self.pid = None # type: int
         self.sync_internal = None # type: bool
         self.ipc_api = IPCAPI()
+        self.ipc_tcp_port = None
         self.fifo_response_buffer_size = None # type: int # Will be in megabytes
         self.is_first_worker = None # type: bool
         self.shmem_size = -1.0
