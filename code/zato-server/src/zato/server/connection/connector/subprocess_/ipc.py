@@ -59,6 +59,7 @@ class SubprocessIPC(object):
     ipc_config_name = '<ipc-config-name-empty>'
     auth_username = '<auth-username-empty>'
     pidfile_suffix = 'not-configured'
+    ipc_tcp_port = None
 
     connector_module = '<connector-module-empty>'
 
@@ -72,7 +73,6 @@ class SubprocessIPC(object):
     def __init__(self, server):
         # type: (ParallelServer)
         self.server = server
-        self.ipc_tcp_port = None
 
 # ################################################################################################################################
 
