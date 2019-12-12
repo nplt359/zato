@@ -11,6 +11,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 # stdlib
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from logging import INFO, WARN
 from re import IGNORECASE
@@ -19,7 +20,7 @@ from traceback import format_exc
 from uuid import uuid4
 
 # anyjson
-from anyjson import dumps
+from anyjson import dumps, deserialize
 
 # gevent
 import gevent.monkey # Needed for Cassandra
@@ -658,6 +659,15 @@ class ParallelServer(BrokerMessageReceiver, ConfigLoader, HTTPHandler):
             self.startup_callable_tool.invoke(SERVER_STARTUP.PHASE.IN_PROCESS_OTHER, kwargs={
                 'parallel_server': self,
             })
+            if self.fs_server_config.component_enabled.ibm_mq:
+                for i in range(10):
+                    ibm_config = self.connector_config_ipc.get_config(self.connector_ibm_mq.ipc_config_name)
+                    if ibm_config:
+                        ibm_ipc_tcp_port = deserialize(ibm_config).get('port')
+                        self.connector_ibm_mq.ipc_tcp_port = ibm_ipc_tcp_port
+                        break
+                    else:
+                        time.sleep(2)
 
         # IPC
         self.ipc_api.name = self.ipc_api.get_endpoint_name(self.cluster.name, self.name, self.pid)
