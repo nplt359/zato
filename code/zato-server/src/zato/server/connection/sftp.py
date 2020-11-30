@@ -334,10 +334,8 @@ class SFTPIPCFacade(object):
         day = line[1]
 
         line = line[2:]
-        line = line[0]
 
         # Next token is either year or hour:minute
-        line = line.split(' ', 1)
         year_time_info = line[0]
 
         # We can now combine all date elements to build a full modification time
