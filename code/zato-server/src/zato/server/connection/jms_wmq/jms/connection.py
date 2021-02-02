@@ -370,8 +370,6 @@ class WebSphereMQConnection(object):
 
         queue = self.get_queue_for_sending(destination)
 
-        #raise Exception('QQQ {}'.format(repr(md)))
-
         try:
             queue.put(body, md)
         except self.mq.MQMIError as e:

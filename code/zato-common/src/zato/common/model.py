@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Copyright (C) 2019, Zato Source s.r.o. https://zato.io
+Copyright (C) Zato Source s.r.o. https://zato.io
 
 Licensed under LGPLv3, see LICENSE.txt for terms and conditions.
 """
@@ -9,7 +9,7 @@ Licensed under LGPLv3, see LICENSE.txt for terms and conditions.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 # Unlike zato.common.odb.model - this place is where DB-independent models are kept,
-# regardless if they're backed by an SQL database or not.
+# regardless if they are backed by an SQL database or not.
 
 # ################################################################################################################################
 # ################################################################################################################################
@@ -20,30 +20,32 @@ class FileTransferChannel(object):
         self.id   = None      # type: int
         self.name = None      # type: str
         self.is_active = None # type: bool
-        self.id = None        # type: int
-        self.name = None      # type: str
 
-        self.is_active = None     # type: bool
+        self.is_hot_deploy = None # type: bool
         self.source_type = None   # type: str
-        self.pickup_from = None   # type: str
-        self.service_list = None  # type: list
-        self.topic_list = None    # type: list
-        self.parse_with = None    # type: str
+        self.pickup_from = ''     # type: str
+        self.parse_with = ''      # type: str
         self.ftp_source_id = None # type: int
         self.line_by_line = None  # type: bool
-        self.file_patterns = None # type: str
+        self.file_patterns = ''   # type: str
+
+        self.service_list = None      # type: list
+        self.topic_list = None        # type: list
+        self.outconn_rest_list = None # type: list
 
         self.read_on_pickup = None  # type: bool
         self.sftp_source_id = None  # type: int
         self.parse_on_pickup = None # type: bool
 
-        self.service_list_json = None # type: str
-        self.topic_list_json = None   # type: str
-        self.ftp_source_name = None   # type: str
-        self.sftp_source_name = None  # type: str
+        self.ftp_source_name = ''  # type: str
+        self.sftp_source_name = '' # type: str
+
+        self.service_list_json = None      # type: str
+        self.topic_list_json = None        # type: str
+        self.outconn_rest_list_json = None # type: str
 
         self.scheduler_job_id = None    # type: int
-        self.move_processed_to = None   # type: str
+        self.move_processed_to = ''     # type: str
         self.delete_after_pickup = None # type: bool
 
 # ################################################################################################################################
@@ -69,3 +71,38 @@ class FileTransferChannel(object):
 # ################################################################################################################################
 # ################################################################################################################################
 
+class HL7ConfigObject:
+    def __init__(self):
+        self._config_attrs = []
+        self.id   = None      # type: int
+        self.name = None      # type: str
+        self.is_active = None # type: bool
+        self.sec_type = None  # type: str
+        self.security_id = None # type: str
+        self.is_audit_log_sent_active = None       # type: bool
+        self.is_audit_log_received_active = None   # type: bool
+        self.max_len_messages_sent = None          # type: int
+        self.max_len_messages_received = None      # type: int
+        self.max_bytes_per_message_sent = None     # type: int
+        self.max_bytes_per_message_received = None # type: int
+
+# ################################################################################################################################
+# ################################################################################################################################
+
+class AuditLogEvent:
+    def __init__(self):
+        self._config_attrs = []
+        self.server_name = ''
+        self.server_pid = ''
+        self.type_   = ''
+        self.object_id = ''
+        self.conn_id = ''
+        self.direction = ''
+        self.data = ''
+        self.timestamp = None # type: str
+        self.timestamp_utc = None
+        self.msg_id = ''
+        self.in_reply_to = ''
+
+# ################################################################################################################################
+# ################################################################################################################################

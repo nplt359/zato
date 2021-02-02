@@ -14,7 +14,6 @@ import os
 import signal
 import sys
 from http.client import BAD_REQUEST, FORBIDDEN, INTERNAL_SERVER_ERROR, NOT_ACCEPTABLE, OK, responses, SERVICE_UNAVAILABLE
-from json import loads
 from logging import Formatter, getLogger, StreamHandler
 from logging.handlers import RotatingFileHandler
 from os import getppid, path
@@ -36,11 +35,11 @@ from builtins import bytes
 from six import PY2
 
 # Zato
-from zato.common import MISC
+from zato.common.api import MISC
 from zato.common.broker_message import code_to_name
-from zato.common.util import parse_cmd_line_options
+from zato.common.json_internal import dumps, loads
+from zato.common.util.api import parse_cmd_line_options
 from zato.common.util.auth import parse_basic_auth
-from zato.common.util.json_ import dumps
 from zato.common.util.posix_ipc_ import ConnectorConfigIPC
 
 # ################################################################################################################################
@@ -163,7 +162,7 @@ class BaseConnectionContainer(object):
         self.server_address = self.server_address.format(self.server_port, self.server_path)
 
         with open(config.logging_conf_path) as f:
-            logging_config = yaml.load(f)
+            logging_config = yaml.load(f, yaml.FullLoader)
 
         if not 'zato_{}'.format(self.conn_type) in logging_config['loggers']:
             logging_config = get_logging_config(self.conn_type, self.logging_file_name)
@@ -362,11 +361,11 @@ class BaseConnectionContainer(object):
                     data = 'You are not allowed to access this resource'
                     content_type = 'text/plain'
 
-        except Exception as e:
+        except Exception:
             self.logger.warn(format_exc())
             content_type = 'text/plain'
             status = _http_503
-            data = repr(e.args)
+            data = format_exc()
         finally:
 
             try:

@@ -10,7 +10,6 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 # stdlib
 from http.client import OK
-from json import loads
 from logging import getLogger
 from traceback import format_exc
 
@@ -21,6 +20,7 @@ from bunch import bunchify
 import requests
 
 # Zato
+from zato.common.json_internal import loads
 from zato.common.util.http import get_proxy_config
 from zato.server.connection.wrapper import Wrapper
 
@@ -83,7 +83,7 @@ class OutconnIMTelegramWrapper(Wrapper):
 
     def __init__(self, *args, **kwargs):
         super(OutconnIMTelegramWrapper, self).__init__(*args, **kwargs)
-        self._client = None  # type: TelegramClient
+        self._impl = None  # type: TelegramClient
 
 # ################################################################################################################################
 
@@ -101,7 +101,7 @@ class OutconnIMTelegramWrapper(Wrapper):
             }
 
             # Create the actual connection object
-            self._client = TelegramClient(**client_config)
+            self._impl = TelegramClient(**client_config)
 
             # Confirm the connection was established
             self.ping()
@@ -112,12 +112,12 @@ class OutconnIMTelegramWrapper(Wrapper):
 # ################################################################################################################################
 
     def _delete(self):
-        self._client.session.close()
+        self._impl.session.close()
 
 # ################################################################################################################################
 
     def _ping(self):
-        return self._client.ping()
+        return self._impl.ping()
 
 # ################################################################################################################################
 # ################################################################################################################################

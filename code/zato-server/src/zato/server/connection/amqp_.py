@@ -29,8 +29,9 @@ from future.utils import itervalues
 from past.builtins import xrange
 
 # Zato
-from zato.common import AMQP, CHANNEL, SECRET_SHADOW, get_version
-from zato.common.util import get_component_name
+from zato.common.api import AMQP, CHANNEL, SECRET_SHADOW
+from zato.common.version import get_version
+from zato.common.util.api import get_component_name
 from zato.server.connection.connector import Connector, Inactive
 
 version = get_version()
@@ -363,7 +364,7 @@ class ConnectorAMQP(Connector):
         else:
             prefix = 'amqp://'
 
-        conn_string = '{}{}:{}@{}:{}{}'.format(prefix, self.config.username,
+        conn_string = '{}{}:{}@{}:{}/{}'.format(prefix, self.config.username,
             self.config.password if needs_password else SECRET_SHADOW, host, self.config.port, self.config.vhost)
 
         return conn_string
@@ -559,9 +560,12 @@ class ConnectorAMQP(Connector):
         # type: (dict)
         """ Deletes an outgoing connection. Must be called with self.lock held.
         """
-        self._producers[config.old_name].stop()
-        del self._producers[config.old_name]
-        del self.outconns[config.old_name]
+        # It will be old_name if this is an edit and name if it a deletion.
+        _name = config.get('old_name') or config.name
+
+        self._producers[_name].stop()
+        del self._producers[_name]
+        del self.outconns[_name]
 
 # ################################################################################################################################
 

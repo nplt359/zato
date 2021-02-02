@@ -20,9 +20,9 @@ from bunch import bunchify
 from sh import Command, ErrorReturnCode
 
 # Zato
-from zato.common import SFTP
+from zato.common.api import SFTP
+from zato.common.json_internal import dumps
 from zato.common.sftp import SFTPOutput
-from zato.common.util.json_ import dumps
 from zato.server.connection.connector.subprocess_.base import BaseConnectionContainer, Response
 
 # ################################################################################################################################
@@ -55,7 +55,7 @@ class SFTPConnection(object):
 
     def __init__(self, logger, **config):
         self.logger = logger
-        self.config = bunchify(config)     # type: Bunch
+        self.config = bunchify(config) # type: Bunch
 
         # Reject unknown IP types
         if self.config.force_ip_type:
@@ -195,6 +195,7 @@ class SFTPConnection(object):
             try:
                 # Finally, execute all the commands
                 result = self.command(*args)
+
             except Exception:
                 out.is_ok = False
                 out.details = format_exc()
@@ -208,7 +209,25 @@ class SFTPConnection(object):
                 out.stdout = result.stdout
                 out.stderr = result.stderr
             finally:
+                self.encode_out(out)
                 return out
+
+# ################################################################################################################################
+
+    def encode_out(self, out):
+        # type: (SFTPOutput) -> None
+
+        # We need to check for None below, particularly in stderr and stdout,
+        # because they both can be an empty bytes object.
+
+        if out.command is not None:
+            out.command = [elem.decode('utf8') for elem in out.command[:]]
+
+        if out.stderr is not None:
+            out.stderr = out.stderr.decode('utf8')
+
+        if out.stdout is not None:
+            out.stdout = out.stdout.decode('utf8')
 
 # ################################################################################################################################
 

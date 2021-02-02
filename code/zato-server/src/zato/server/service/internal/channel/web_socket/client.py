@@ -35,8 +35,9 @@ class Create(AdminService):
     class SimpleIO(AdminSIO):
         input_required = (AsIs('pub_client_id'), AsIs('ext_client_id'), 'is_internal', 'local_address', 'peer_address',
             'peer_fqdn', 'connection_time', 'last_seen', 'channel_name')
-        input_optional = ('ext_client_name', 'peer_forwarded_for', 'peer_forwarded_for_fqdn')
-        output_optional = ('ws_client_id',)
+        input_optional = 'ext_client_name', 'peer_forwarded_for', 'peer_forwarded_for_fqdn'
+        output_optional = 'ws_client_id'
+        response_elem = None
 
     def handle(self):
         req = self.request.input
@@ -102,7 +103,7 @@ class UnregisterWSSubKey(AdminService):
             sub = self.pubsub.get_subscription_by_sub_key(sub_key)
 
             if self.request.input.needs_wsx_close or (sub and sub.unsub_on_wsx_close):
-                self.invoke('zato.pubsub.pubapi.unsubscribe',{
+                self.invoke('zato.pubsub.pubapi.unsubscribe', {
                     'sub_key': sub.sub_key,
                     'topic_name': sub.topic_name,
                 })
@@ -122,9 +123,8 @@ class DeleteByServer(AdminService):
         input_required = 'needs_pid',
 
     def handle(self):
-
         with closing(self.odb.session()) as session:
-            server_pid = self.server.pid if self.request.input.needs_pid else None
+            server_pid = self.server.pid if self.request.input.get('needs_pid') else None
             clients = web_socket_clients_by_server_id(session, self.server.id, server_pid)
             clients.delete()
             session.commit()

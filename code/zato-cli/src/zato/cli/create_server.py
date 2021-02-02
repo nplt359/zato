@@ -9,27 +9,17 @@ Licensed under LGPLv3, see LICENSE.txt for terms and conditions.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 # stdlib
-import os, uuid
 from copy import deepcopy
-from datetime import datetime
-from traceback import format_exc
-
-# Cryptography
-from cryptography.fernet import Fernet
-
-# SQLAlchemy
-from sqlalchemy.exc import IntegrityError
-
-# Python 2/3 compatibility
-from six import PY3
 
 # Zato
-from zato.cli import ZatoCommand, common_logging_conf_contents, common_odb_opts, kvdb_opts, sql_conf_contents
-from zato.cli._apispec_default import apispec_files
-from zato.common import CONTENT_TYPE, default_internal_modules, SERVER_JOIN_STATUS
-from zato.common.crypto import well_known_data
-from zato.common.defaults import http_plain_server_port
-from zato.common.odb.model import Cluster, Server
+from zato.cli import common_logging_conf_contents, common_odb_opts, kvdb_opts, sql_conf_contents, ZatoCommand
+from zato.common.api import CONTENT_TYPE, default_internal_modules
+from zato.common.simpleio_ import simple_io_conf_contents
+
+# ################################################################################################################################
+
+# For pyflakes
+simple_io_conf_contents = simple_io_conf_contents
 
 # ################################################################################################################################
 
@@ -42,6 +32,8 @@ for key, value in default_internal_modules.items():
     deploy_internal.append('{}={}'.format(key, value))
 
 server_conf_dict.deploy_internal = '\n'.join(deploy_internal)
+
+# ################################################################################################################################
 
 server_conf_template = """[main]
 gunicorn_bind=0.0.0.0:{{port}}
@@ -132,6 +124,7 @@ startup_callable=
 return_json_schema_errors=False
 sftp_genkey_command=dropbearkey
 posix_ipc_skip_platform=darwin
+service_invoker_allow_internal=
 
 [http]
 methods_allowed=GET, POST, DELETE, PUT, PATCH, HEAD, OPTIONS
@@ -202,11 +195,11 @@ stats=True
 slow_response=True
 cassandra=True
 email=True
+hl7=True
 search=True
 msg_path=True
 ibm_mq=False
 odoo=True
-stomp=True
 zeromq=True
 patterns=True
 target_matcher=False
@@ -240,7 +233,7 @@ data_len=0
 
 [wsx]
 hook_service=
-json_library=rapidjson
+json_library=stdlib
 
 [content_type]
 json = {JSON}
@@ -274,6 +267,7 @@ size=0.1 # In MB
 http_access_log_ignore=
 
 [greenify]
+#/path/to/oracle/instantclient_19_3/libclntsh.so.19.1=True
 
 [os_environ]
 sample_key=sample_value
@@ -283,6 +277,7 @@ sample_key=sample_value
 
 """.format(**server_conf_dict)
 
+# ################################################################################################################################
 
 pickup_conf = """[json]
 pickup_from=./pickup/incoming/json
@@ -327,6 +322,8 @@ services=zato.pickup.update-static
 topics=
 """
 
+# ################################################################################################################################
+
 service_sources_contents = """# Visit https://zato.io/docs for more information.
 
 # All paths are relative to server root so that, for instance,
@@ -341,10 +338,14 @@ service_sources_contents = """# Visit https://zato.io/docs for more information.
 
 # Visit https://zato.io/docs for more information."""
 
+# ################################################################################################################################
+
 user_conf_contents = """[sample_section]
 string_key=sample_string
 list_key=sample,list
 """
+
+# ################################################################################################################################
 
 sso_conf_contents = '''[main]
 encrypt_email=True
@@ -454,6 +455,8 @@ default_page_size=50
 max_page_size=100
 '''
 
+# ################################################################################################################################
+
 sso_confirm_template = """
 Hello {data.display_name},
 
@@ -469,6 +472,8 @@ If you didn't want to create the account, just delete this email and everything 
 Your Zato SSO team.
 """.strip()
 
+# ################################################################################################################################
+
 sso_welcome_template = """
 Hello {data.display_name}!
 
@@ -482,6 +487,8 @@ Thanks for joining us. Here are a couple great ways to get started:
 Your Zato SSO team.
 """.strip()
 
+# ################################################################################################################################
+
 secrets_conf_template = """
 [secret_keys]
 key1={keys_key1}
@@ -494,20 +501,7 @@ server_conf.misc.jwt_secret={zato_misc_jwt_secret}
 server_conf.odb.password={zato_odb_password}
 """
 
-simple_io_conf_contents = """
-[int]
-exact=id
-suffix=_count, _id, _size, _size_min, _size_max, _timeout
-
-[bool]
-prefix=by_, has_, is_, may_, needs_, should_
-
-[secret]
-exact=auth_data, auth_token, password, password1, password2, secret, secret_key, tls_pem_passphrase, token
-
-[bytes_to_str]
-encoding={bytes_to_str_encoding}
-""".lstrip()
+# ################################################################################################################################
 
 lua_zato_rename_if_exists = """
 -- Checks whether a from_key exists and if it does renames it to to_key.
@@ -528,7 +522,11 @@ else
 end
 """
 
+# ################################################################################################################################
+
 default_odb_pool_size = 15
+
+# ################################################################################################################################
 
 directories = (
     'config',
@@ -568,6 +566,8 @@ directories = (
     'config/repo/tls/ca-certs',
 )
 
+# ################################################################################################################################
+
 files = {
     'config/repo/logging.conf': common_logging_conf_contents.format(log_path='./logs/server.log'),
     'config/repo/service-sources.txt': service_sources_contents,
@@ -577,8 +577,13 @@ files = {
     'config/repo/static/email/sso-welcome.txt': sso_welcome_template,
 }
 
+# ################################################################################################################################
+
 priv_key_location = './config/repo/config-priv.pem'
 priv_key_location = './config/repo/config-pub.pem'
+
+# ################################################################################################################################
+# ################################################################################################################################
 
 class Create(ZatoCommand):
     """ Creates a new Zato server
@@ -599,13 +604,26 @@ class Create(ZatoCommand):
     opts.append({'name':'--jwt_secret', 'help':"Server's JWT secret (must be the same for all servers)"})
     opts.append({'name':'--http_port', 'help':"Server's HTTP port"})
 
+# ################################################################################################################################
+
     def __init__(self, args):
+
+        # stdlib
+        import os
+        import uuid
+
         super(Create, self).__init__(args)
         self.target_dir = os.path.abspath(args.path)
         self.dirs_prepared = False
         self.token = uuid.uuid4().hex.encode('utf8')
 
+# ################################################################################################################################
+
     def prepare_directories(self, show_output):
+
+        # stdlib
+        import os
+
         if show_output:
             self.logger.debug('Creating directories..')
 
@@ -617,7 +635,32 @@ class Create(ZatoCommand):
 
         self.dirs_prepared = True
 
-    def execute(self, args, default_http_port=http_plain_server_port, show_output=True, return_server_id=False):
+# ################################################################################################################################
+
+    def execute(self, args, default_http_port=None, show_output=True, return_server_id=False):
+
+        # stdlib
+        import os
+        from datetime import datetime
+        from traceback import format_exc
+
+        # Cryptography
+        from cryptography.fernet import Fernet
+
+        # SQLAlchemy
+        from sqlalchemy.exc import IntegrityError
+
+        # Python 2/3 compatibility
+        from six import PY3
+
+        # Zato
+        from zato.cli._apispec_default import apispec_files
+        from zato.common.api import SERVER_JOIN_STATUS
+        from zato.common.crypto.const import well_known_data
+        from zato.common.defaults import http_plain_server_port
+        from zato.common.odb.model import Cluster, Server
+
+        default_http_port = default_http_port or http_plain_server_port
 
         engine = self._get_engine(args)
         session = self._get_session(engine)
@@ -817,3 +860,6 @@ You can now start it with the 'zato start {}' command.""".format(self.target_dir
         # otherwise it would be construed as a non-0 return code from this process.
         if return_server_id:
             return server.id
+
+# ################################################################################################################################
+# ################################################################################################################################

@@ -14,9 +14,6 @@ from datetime import datetime
 from http.client import BAD_REQUEST, METHOD_NOT_ALLOWED
 from traceback import format_exc
 
-# anyjson
-from anyjson import dumps
-
 # Bunch
 from bunch import bunchify
 
@@ -35,13 +32,14 @@ from zato.common.py23_ import maxint
 
 # Zato
 from zato.bunch import Bunch
-from zato.common import BROKER, CHANNEL, DATA_FORMAT, Inactive, KVDB, NO_DEFAULT_VALUE, PARAMS_PRIORITY, PUBSUB, WEB_SOCKET, \
-     ZatoException, zato_no_op_marker
+from zato.common.api import BROKER, CHANNEL, DATA_FORMAT, HL7, KVDB, NO_DEFAULT_VALUE, PARAMS_PRIORITY, PUBSUB, \
+     WEB_SOCKET, zato_no_op_marker
 from zato.common.broker_message import CHANNEL as BROKER_MSG_CHANNEL, SERVICE
-from zato.common.exception import Reportable
+from zato.common.exception import Inactive, Reportable, ZatoException
+from zato.common.json_internal import dumps
 from zato.common.json_schema import ValidationException as JSONSchemaValidationException
 from zato.common.nav import DictNav, ListNav
-from zato.common.util import get_response_value, make_repr, new_cid, payload_from_request, service_name_from_impl, uncamelify
+from zato.common.util.api import get_response_value, make_repr, new_cid, payload_from_request, service_name_from_impl, uncamelify
 from zato.server.connection import slow_response
 from zato.server.connection.email import EMailAPI
 from zato.server.connection.jms_wmq.outgoing import WMQFacade
@@ -53,29 +51,33 @@ from zato.server.pattern.fanout import FanOut
 from zato.server.pattern.invoke_retry import InvokeRetry
 from zato.server.pattern.parallel import ParallelExec
 from zato.server.pubsub import PubSub
-from zato.server.service.reqresp import AMQPRequestData, Cloud, Definition, IBMMQRequestData, InstantMessaging, Outgoing, \
-     Request, Response
+from zato.server.service.reqresp import AMQPRequestData, Cloud, Definition, HL7API, HL7RequestData, IBMMQRequestData, \
+     InstantMessaging, Outgoing, Request
+
+# Zato - Cython
+from zato.cy.reqresp.response import Response
 
 # Not used here in this module but it's convenient for callers to be able to import everything from a single namespace
-from zato.server.service.reqresp.sio import AsIs, CSV, Boolean, Date, DateTime, Dict, Float, ForceType, Integer, List, \
-     ListOfDicts, Nested, Opaque, Unicode, UTC
+from zato.simpleio import AsIs, CSV, Bool, Date, DateTime, Dict, Decimal, DictList, Elem as SIOElem, Float, Int, List, \
+     Opaque, Text, UTC, UUID
 
-# So pyflakes doesn't complain about names being imported but not used
+# For pyflakes
 AsIs = AsIs
 CSV = CSV
-Boolean = Boolean
+Bool = Bool
 Date = Date
 DateTime = DateTime
+Decimal = Decimal
+Bool = Bool
 Dict = Dict
+DictList = DictList
 Float = Float
-ForceType = ForceType
-Integer = Integer
+Int = Int
 List = List
-ListOfDicts = ListOfDicts
-Nested = Nested
 Opaque = Opaque
-Unicode = Unicode
+Text = Text
 UTC = UTC
+UUID = UUID
 
 # ################################################################################################################################
 
@@ -88,7 +90,7 @@ if 0:
     # Zato
     from zato.broker.client import BrokerClient, BrokerClientAPI
     from zato.common.audit import AuditPII
-    from zato.common.crypto import ServerCryptoManager
+    from zato.common.crypto.api import ServerCryptoManager
     from zato.common.json_schema import Validator as JSONSchemaValidator
     from zato.common.odb.api import ODBManager
     from zato.server.connection.ftp import FTPStore
@@ -101,15 +103,19 @@ if 0:
     from zato.server.query import CassandraQueryAPI
     from zato.sso.api import SSOAPI
 
+    # Zato - Cython
+    from zato.simpleio import CySimpleIO
+
     # For pyflakes
     AuditPII = AuditPII
     BrokerClient = BrokerClient
     BrokerClientAPI = BrokerClientAPI
     Callable = Callable
-    ConfigDict = ConfigDict
-    ConfigStore = ConfigStore
     CassandraAPI = CassandraAPI
     CassandraQueryAPI = CassandraQueryAPI
+    ConfigDict = ConfigDict
+    ConfigStore = ConfigStore
+    CySimpleIO = CySimpleIO
     FTPStore = FTPStore
     JSONPointerStore = JSONPointerStore
     JSONSchemaValidator = JSONSchemaValidator
@@ -133,9 +139,13 @@ NOT_GIVEN = 'ZATO_NOT_GIVEN'
 
 # ################################################################################################################################
 
-# Back compat
-Bool = Boolean
-Int = Integer
+# Backward compatibility
+Boolean = Bool
+Integer = Int
+ForceType = SIOElem
+ListOfDicts = DictList
+Nested = Opaque
+Unicode = Text
 
 # ################################################################################################################################
 
@@ -145,6 +155,10 @@ PubSub = PubSub
 # ################################################################################################################################
 
 _wsgi_channels = (CHANNEL.HTTP_SOAP, CHANNEL.INVOKE, CHANNEL.INVOKE_ASYNC)
+
+# ################################################################################################################################
+
+_response_raw_types=(basestring, dict, list, tuple, EtreeElement, ObjectifiedElement)
 
 # ################################################################################################################################
 
@@ -350,8 +364,11 @@ class Service(object):
     _before_job_hooks = []
     _after_job_hooks = []
 
+    # Cython based SimpleIO definition created by service store when the class is deployed
+    _sio = None # type: CySimpleIO
+
     # Rate limiting
-    _has_rate_limiting = None
+    _has_rate_limiting = None # type: bool
 
     # User management and SSO
     sso = None # type: SSOAPI
@@ -423,7 +440,6 @@ class Service(object):
             self._out_plain_http,
             self._worker_config.out_soap,
             self._worker_store.sql_pool_store,
-            self._worker_store.stomp_outconn_api,
             ZMQFacade(self._worker_store.zmq_out_api) if self.component_enabled_zeromq else NO_DEFAULT_VALUE,
             self._worker_store.outconn_wsx,
             self._worker_store.vault_conn_api,
@@ -433,6 +449,7 @@ class Service(object):
             self._worker_store.outconn_ldap,
             self._worker_store.outconn_mongodb,
             self._worker_store.def_kafka,
+            HL7API(self._worker_store.outconn_hl7_mllp) if self.component_enabled_hl7 else None,
         )
 
     @staticmethod
@@ -519,20 +536,21 @@ class Service(object):
         if may_have_wsgi_environ:
             self.request.http.init(self.wsgi_environ)
 
-        # self.is_sio attribute is set by ServiceStore during deployment
+        # self.has_sio attribute is set by ServiceStore during deployment
         if self.has_sio:
-            self.request.init(True, self.cid, self.SimpleIO, self.data_format, self.transport, self.wsgi_environ,
+            self.request.init(True, self.cid, self._sio, self.data_format, self.transport, self.wsgi_environ,
                 self.server.encrypt)
-            self.response.init(self.cid, self.SimpleIO, self.data_format)
+            self.response.init(self.cid, self._sio, self.data_format)
 
         # Cache is always enabled
         self.cache = self._worker_store.cache_api
 
-    def set_response_data(self, service, _raw_types=(basestring, dict, list, tuple, EtreeElement, ObjectifiedElement), **kwargs):
+    def set_response_data(self, service, _raw_types=_response_raw_types, **kwargs):
+        # type: (Service, tuple, **object)
         response = service.response.payload
         if not isinstance(response, _raw_types):
-            response = response.getvalue(serialize=kwargs['serialize'])
-            if kwargs['as_bunch']:
+            response = response.getvalue(serialize=kwargs.get('serialize'))
+            if kwargs.get('as_bunch'):
                 response = bunchify(response)
             service.response.payload = response
 
@@ -609,12 +627,13 @@ class Service(object):
 
         wsgi_environ = kwargs.get('wsgi_environ', {})
         payload = wsgi_environ.get('zato.request.payload')
+        channel_item = wsgi_environ.get('zato.channel_item', {})
 
         # Here's an edge case. If a SOAP request has a single child in Body and this child is an empty element
         # (though possibly with attributes), checking for 'not payload' alone won't suffice - this evaluates
         # to False so we'd be parsing the payload again superfluously.
         if not isinstance(payload, ObjectifiedElement) and not payload:
-            payload = payload_from_request(cid, raw_request, data_format, transport)
+            payload = payload_from_request(cid, raw_request, data_format, transport, channel_item)
 
         job_type = kwargs.get('job_type')
         channel_params = kwargs.get('channel_params', {})
@@ -626,7 +645,7 @@ class Service(object):
             job_type=job_type, channel_params=channel_params,
             merge_channel_params=merge_channel_params, params_priority=params_priority,
             in_reply_to=wsgi_environ.get('zato.request_ctx.in_reply_to', None), environ=kwargs.get('environ'),
-            wmq_ctx=kwargs.get('wmq_ctx'), channel_info=kwargs.get('channel_info'))
+            wmq_ctx=kwargs.get('wmq_ctx'), channel_info=kwargs.get('channel_info'), channel_item=channel_item)
 
         # It's possible the call will be completely filtered out. The uncommonly looking not self.accept shortcuts
         # if ServiceStore replaces self.accept with None in the most common case of this method's not being
@@ -706,8 +725,6 @@ class Service(object):
             except Exception as ex:
                 e = ex
                 exc_formatted = format_exc()
-                logger.warn(exc_formatted)
-
             finally:
                 try:
                     response = set_response_func(service, data_format=data_format, transport=transport, **kwargs)
@@ -719,9 +736,6 @@ class Service(object):
                         spawn(func, self, service.response.payload, exc_formatted)
 
                 except Exception as resp_e:
-
-                    # If we already have an exception around, log the new one but don't overwrite the old one with it.
-                    logger.warn('Exception in service `%s`, e:`%s`', service.name, format_exc())
 
                     if e:
                         if isinstance(e, Reportable):
@@ -773,31 +787,28 @@ class Service(object):
         set_response_func = kwargs.pop('set_response_func', service.set_response_data)
 
         invoke_args = (set_response_func, service, payload, channel, data_format, transport, self.server,
-            self.broker_client, self._worker_store, kwargs.pop('cid', self.cid), self.request.simple_io_config)
+            self.broker_client, self._worker_store, kwargs.pop('cid', self.cid), None)
 
         kwargs.update({'serialize':serialize, 'as_bunch':as_bunch})
 
-        try:
-            if timeout:
-                try:
-                    g = spawn(self.update_handle, *invoke_args, **kwargs)
-                    return g.get(block=True, timeout=timeout)
-                except Timeout:
-                    g.kill()
-                    logger.warn('Service `%s` timed out (%s)', service.name, self.cid)
-                    if raise_timeout:
-                        raise
+        if timeout:
+            try:
+                g = spawn(self.update_handle, *invoke_args, **kwargs)
+                return g.get(block=True, timeout=timeout)
+            except Timeout:
+                g.kill()
+                logger.warn('Service `%s` timed out (%s)', service.name, self.cid)
+                if raise_timeout:
+                    raise
+        else:
+            out = self.update_handle(*invoke_args, **kwargs)
+
+            if kwargs.get('skip_response_elem') and hasattr(out, 'keys'):
+                keys = list(iterkeys(out))
+                response_elem = keys[0]
+                return out[response_elem]
             else:
-                out = self.update_handle(*invoke_args, **kwargs)
-                if kwargs.get('skip_response_elem') and hasattr(out, 'keys'):
-                    keys = list(iterkeys(out))
-                    response_elem = keys[0]
-                    return out[response_elem]
-                else:
-                    return out
-        except Exception:
-            logger.warn('Could not invoke `%s`, e:`%s`', service.name, format_exc())
-            raise
+                return out
 
     def invoke(self, name, *args, **kwargs):
         """ Invokes a service synchronously by its name.
@@ -1128,12 +1139,13 @@ class Service(object):
     def update(
              service,               # type: Service
              channel_type,          # type: str
-             server, broker_client, # type: object
+             server,                # type: ParallelServer
+             broker_client,         # type: object
              _ignored,              # type: object
-             cid,
+             cid,                   # type: str
              payload,               # type: object
              raw_request,           # type: object
-             transport=None,
+             transport=None,        # type: str
              simple_io_config=None, # type: object
              data_format=None,      # type: str
              wsgi_environ=None,     # type: dict
@@ -1146,9 +1158,11 @@ class Service(object):
              init=True,             # type: bool
              wmq_ctx=None,          # type: object
              channel_info=None,     # type: ChannelInfo
+             channel_item=None,     # type: dict
              _wsgi_channels=_wsgi_channels, # type: object
-             _AMQP=CHANNEL.AMQP,       # type: str
-             _WMQ=CHANNEL.WEBSPHERE_MQ # type: str
+             _AMQP=CHANNEL.AMQP,        # type: str
+             _WMQ=CHANNEL.WEBSPHERE_MQ, # type: str
+             _HL7v2=HL7.Const.Version.v2.id
              ):
         """ Takes a service instance and updates it with the current request's context data.
         """
@@ -1158,8 +1172,6 @@ class Service(object):
         service.request.payload = payload
         service.request.raw_request = raw_request
         service.transport = transport
-        service.request.simple_io_config = simple_io_config
-        service.response.simple_io_config = simple_io_config
         service.data_format = data_format
         service.wsgi_environ = wsgi_environ or {}
         service.job_type = job_type
@@ -1172,7 +1184,6 @@ class Service(object):
             service.request.channel_params.update(channel_params)
 
         service.request.merge_channel_params = merge_channel_params
-        service.request.params_priority = params_priority
         service.in_reply_to = in_reply_to
         service.environ = environ or {}
 
@@ -1181,8 +1192,12 @@ class Service(object):
 
         if channel_type == _AMQP:
             service.request.amqp = AMQPRequestData(channel_item['amqp_msg'])
+
         elif channel_type == _WMQ:
             service.request.wmq = service.request.ibm_mq = IBMMQRequestData(wmq_ctx)
+
+        elif data_format == _HL7v2:
+            service.request.hl7 = HL7RequestData(channel_item['hl7_mllp_conn_ctx'], payload)
 
         service.channel = service.chan = channel_info or ChannelInfo(
             channel_item.get('id'), channel_item.get('name'), channel_type,
@@ -1192,6 +1207,21 @@ class Service(object):
 
         if init:
             service._init(channel_type in _wsgi_channels)
+
+# ################################################################################################################################
+
+    def new_instance(self, service_name, *args, **kwargs):
+        """ Creates a new service instance without invoking its handle method.
+        """
+        # type: (str, str, str) -> object
+
+        service, ignored_is_active = \
+            self.server.service_store.new_instance_by_name(service_name, *args, **kwargs) # type: (Service, bool)
+
+        service.update(service, CHANNEL.NEW_INSTANCE, self.server, broker_client=self.broker_client, _ignored=None,
+            cid=self.cid, payload=self.request.payload, raw_request=self.request.raw_request, wsgi_environ=self.wsgi_environ)
+
+        return service
 
 # ################################################################################################################################
 

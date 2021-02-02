@@ -32,16 +32,19 @@ from sqlalchemy.sql.type_api import TypeEngine
 from bunch import Bunch, bunchify
 
 # Zato
-from zato.common import DEPLOYMENT_STATUS, GENERIC, HTTP_SOAP, Inactive, MS_SQL, NotGiven, PUBSUB, SEC_DEF_TYPE, SECRET_SHADOW, \
-     SERVER_UP_STATUS, ZATO_NONE, ZATO_ODB_POOL_NAME
+from zato.common.api import DEPLOYMENT_STATUS, GENERIC, HTTP_SOAP, MS_SQL, NotGiven, PUBSUB, SEC_DEF_TYPE, SECRET_SHADOW, \
+     SERVER_UP_STATUS, UNITTEST, ZATO_NONE, ZATO_ODB_POOL_NAME
+from zato.common.exception import Inactive
 from zato.common.mssql_direct import MSSQLDirectAPI, SimpleSession
-from zato.common.odb import get_ping_query, query
+from zato.common.odb import query
+from zato.common.odb.ping import get_ping_query
 from zato.common.odb.model import APIKeySecurity, Cluster, DeployedService, DeploymentPackage, DeploymentStatus, HTTPBasicAuth, \
      JWT, OAuth, PubSubEndpoint, SecurityBase, Server, Service, TLSChannelSecurity, XPathSecurity, \
      WSSDefinition, VaultConnection
+from zato.common.odb.testing import UnittestEngine
 from zato.common.odb.query.pubsub import subscription as query_ps_subscription
 from zato.common.odb.query import generic as query_generic
-from zato.common.util import current_host, get_component_name, get_engine_url, parse_extra_into_dict, \
+from zato.common.util.api import current_host, get_component_name, get_engine_url, new_cid, parse_extra_into_dict, \
      parse_tls_channel_security_definition, spawn_greenlet
 from zato.common.util.sql import ElemsWithOpaqueMaker, elems_with_opaque
 from zato.common.util.url_dispatcher import get_match_target
@@ -65,6 +68,12 @@ logger = logging.getLogger(__name__)
 # ################################################################################################################################
 
 rate_limit_keys = 'is_rate_limit_active', 'rate_limit_def', 'rate_limit_type', 'rate_limit_check_parent_def'
+
+unittest_fs_sql_config = {
+    UNITTEST.SQL_ENGINE: {
+        'ping_query': 'SELECT 1+1'
+    }
+}
 
 # ################################################################################################################################
 
@@ -108,34 +117,12 @@ class WritableKeyedTuple(object):
 # ################################################################################################################################
 
     def __repr__(self):
-        inner = [(key, getattr(self._elem, key)) for key in self._elem.keys()]
-        outer = [(key, getattr(self, key)) for key in dir(self) if not key.startswith('_')]
-        return 'WritableKeyedTuple(%s)' % (', '.join('%r=%r' % (key, value) for (key, value) in inner + outer))
+        return '<WritableKeyedTuple at {}>'.format(hex(id(self)))
 
 # ################################################################################################################################
-# ################################################################################################################################
 
-class WritableTupleQuery(Query):
-
-    def __iter__(self):
-        it = super(WritableTupleQuery, self).__iter__()
-
-        columns_desc = self.column_descriptions
-
-        first_type = columns_desc[0]['type']
-        len_columns_desc = len(columns_desc)
-
-        # This is a simple result of a query such as session.query(ObjectName).count()
-        if len_columns_desc == 1 and isinstance(first_type, TypeEngine):
-            return it
-
-        # A list of objects, e.g. from .all()
-        elif len_columns_desc > 1:
-            return (WritableKeyedTuple(elem) for elem in it)
-
-        # Anything else
-        else:
-            return it
+    def get_value(self):
+        return self._elem._asdict()
 
 # ################################################################################################################################
 # ################################################################################################################################
@@ -145,15 +132,16 @@ class SessionWrapper(object):
     """
     def __init__(self):
         self.session_initialized = False
-        self.pool = None
-        self.config = None
-        self.is_sqlite = None
+        self.pool = None      # type: SQLConnectionPool
+        self.config = None    # type: dict
+        self.is_sqlite = None # type: bool
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def init_session(self, *args, **kwargs):
         spawn_greenlet(self._init_session, *args, **kwargs)
 
     def _init_session(self, name, config, pool, use_scoped_session=True):
+        # type: (str, dict, SQLConnectionPool, bool)
         self.config = config
         self.fs_sql_config = config['fs_sql_config']
         self.pool = pool
@@ -174,7 +162,7 @@ class SessionWrapper(object):
                 self._session = self._Session()
 
             self.session_initialized = True
-            self.is_sqlite = self.pool.engine.name == 'sqlite'
+            self.is_sqlite = self.pool.engine and self.pool.engine.name == 'sqlite'
 
     def session(self):
         return self._Session()
@@ -182,6 +170,32 @@ class SessionWrapper(object):
     def close(self):
         self._session.close()
 
+# ################################################################################################################################
+# ################################################################################################################################
+
+class WritableTupleQuery(Query):
+
+    def __iter__(self):
+        out = super(WritableTupleQuery, self).__iter__()
+
+        columns_desc = self.column_descriptions
+
+        first_type = columns_desc[0]['type']
+        len_columns_desc = len(columns_desc)
+
+        # This is a simple result of a query such as session.query(ObjectName).count()
+        if len_columns_desc == 1 and isinstance(first_type, TypeEngine):
+            return out
+
+        # A list of objects, e.g. from .all()
+        elif len_columns_desc > 1:
+            return (WritableKeyedTuple(elem) for elem in out)
+
+        # Anything else
+        else:
+            return out
+
+# ################################################################################################################################
 # ################################################################################################################################
 
 class SQLConnectionPool(object):
@@ -193,6 +207,7 @@ class SQLConnectionPool(object):
 
         self.name = name
         self.config = config
+        self.engine = None
         self.engine_name = config['engine'] # self.engine.name is 'mysql' while 'self.engine_name' is mysql+pymysql
 
         # Safe for printing out to logs, any sensitive data has been shadowed
@@ -220,9 +235,13 @@ class SQLConnectionPool(object):
                 _extra['poolclass'] = NullPool
 
         engine_url = get_engine_url(config)
-        self.engine = self._create_engine(engine_url, config, _extra)
 
-        if self.engine and self._is_sa_engine(engine_url):
+        try:
+            self.engine = self._create_engine(engine_url, config, _extra)
+        except Exception as e:
+            self.logger.warn('Could not create SQL connection `%s`, e:`%s`', config['name'], e.args[0])
+
+        if self.engine and (not self._is_unittest_engine(engine_url)) and self._is_sa_engine(engine_url):
             event.listen(self.engine, 'checkin', self.on_checkin)
             event.listen(self.engine, 'checkout', self.on_checkout)
             event.listen(self.engine, 'connect', self.on_connect)
@@ -246,15 +265,32 @@ class SQLConnectionPool(object):
 # ################################################################################################################################
 
     def _is_sa_engine(self, engine_url):
+        # type: (str)
         return 'zato+mssql1' not in engine_url
 
 # ################################################################################################################################
 
-    def _create_engine(self, engine_url, config, extra):
-        if self._is_sa_engine(engine_url):
-            return create_engine(engine_url, **extra)
-        else:
+    def _is_unittest_engine(self, engine_url):
+        # type: (str)
+        return 'zato+unittest' in engine_url
 
+# ################################################################################################################################
+
+    def _create_unittest_engine(self, engine_url, config):
+        # type: (str, dict)
+        return UnittestEngine(engine_url, config)
+
+# ################################################################################################################################
+
+    def _create_engine(self, engine_url, config, extra):
+
+        if self._is_unittest_engine(engine_url):
+            return self._create_unittest_engine(engine_url, config)
+
+        elif self._is_sa_engine(engine_url):
+            return create_engine(engine_url, **extra)
+
+        else:
             # This is a direct MS SQL connection
             connect_kwargs = {
                 'dsn': config['host'],
@@ -307,6 +343,9 @@ class SQLConnectionPool(object):
     def ping(self, fs_sql_config):
         """ Pings the SQL database and returns the response time, in milliseconds.
         """
+        if not self.engine:
+            return
+
         if hasattr(self.engine, 'ping'):
             func = self.engine.ping
             query = self.engine.ping_query
@@ -389,7 +428,12 @@ class PoolStore(object):
             if name in self.wrappers:
                 del self[name]
 
-            config_no_sensitive = deepcopy(config)
+            config_no_sensitive = {}
+
+            for key in config:
+                if key != 'callback_func':
+                    config_no_sensitive[key] = config[key]
+
             config_no_sensitive['password'] = SECRET_SHADOW
             pool = self.sql_conn_class(name, config, config_no_sensitive)
 
@@ -397,6 +441,18 @@ class PoolStore(object):
             wrapper.init_session(name, config, pool)
 
             self.wrappers[name] = wrapper
+
+    set_item = __setitem__
+
+# ################################################################################################################################
+
+    def add_unittest_item(self, name, fs_sql_config=unittest_fs_sql_config):
+        self.set_item(name, {
+            'password': 'password.{}'.format(new_cid),
+            'engine': UNITTEST.SQL_ENGINE,
+            'fs_sql_config': fs_sql_config,
+            'is_active': True,
+        })
 
 # ################################################################################################################################
 
@@ -668,7 +724,7 @@ class ODBManager(SessionWrapper):
                     # Common things first
                     result[target].sec_def.id = sec_def.id
                     result[target].sec_def.name = sec_def.name
-                    result[target].sec_def.password = self.decrypt_func(sec_def.password)
+                    result[target].sec_def.password = self.decrypt_func(sec_def.password or '')
                     result[target].sec_def.sec_type = item.sec_type
 
                     if item.sec_type == SEC_DEF_TYPE.BASIC_AUTH:
@@ -860,7 +916,7 @@ class ODBManager(SessionWrapper):
         """ Returns the list of all HTTP/SOAP connections.
         """
         with closing(self.session()) as session:
-            return query.http_soap_list(session, cluster_id, connection, transport, True, needs_columns)
+            return query.http_soap_list(session, cluster_id, connection, transport, True, None, needs_columns)
 
 # ################################################################################################################################
 
@@ -1093,38 +1149,6 @@ class ODBManager(SessionWrapper):
         """
         with closing(self.session()) as session:
             return query.channel_wmq_list(session, cluster_id, needs_columns)
-
-# ################################################################################################################################
-
-    def get_channel_stomp(self, cluster_id, channel_id):
-        """ Returns a particular STOMP channel.
-        """
-        with closing(self.session()) as session:
-            return query.channel_stomp(session, cluster_id, channel_id)
-
-# ################################################################################################################################
-
-    def get_channel_stomp_list(self, cluster_id, needs_columns=False):
-        """ Returns a list of STOMP channels.
-        """
-        with closing(self.session()) as session:
-            return query.channel_stomp_list(session, cluster_id, needs_columns)
-
-# ################################################################################################################################
-
-    def get_out_stomp(self, cluster_id, out_id):
-        """ Returns an outgoing STOMP connection's details.
-        """
-        with closing(self.session()) as session:
-            return query.out_stomp(session, cluster_id, out_id)
-
-# ################################################################################################################################
-
-    def get_out_stomp_list(self, cluster_id, needs_columns=False):
-        """ Returns a list of outgoing STOMP connections.
-        """
-        with closing(self.session()) as session:
-            return query.out_stomp_list(session, cluster_id, needs_columns)
 
 # ################################################################################################################################
 

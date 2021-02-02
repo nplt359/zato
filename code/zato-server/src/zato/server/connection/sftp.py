@@ -10,7 +10,6 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 # stdlib
 from datetime import date, datetime
-from json import loads
 from logging import getLogger
 from tempfile import NamedTemporaryFile
 from time import strptime
@@ -23,8 +22,9 @@ from gevent.fileobject import FileObjectThread
 from humanize import naturalsize
 
 # Zato
-from zato.common import SFTP
+from zato.common.api import SFTP
 from zato.common.broker_message import OUTGOING
+from zato.common.json_internal import loads
 from zato.common.sftp import SFTPOutput
 
 # ################################################################################################################################
@@ -274,11 +274,15 @@ class SFTPIPCFacade(object):
             today = datetime.today()
             mod_date = strptime('{}-{}'.format(month, day), '%b-%d')
 
+            hour, minute = year_hour_info.split(':')
+            hour = int(hour)
+            minute = int(minute)
+
             # If modification month is bigger than current one, it means that it must have been already
             # in the previous year. Otherwise, it was in the same year we have today.
             mod_year = today.year - 1 if mod_date.tm_mon > today.month else today.year
 
-            return date(mod_year, mod_date.tm_mon, mod_date.tm_mday)
+            return datetime(mod_year, mod_date.tm_mon, mod_date.tm_mday, hour, minute)
 
 # ################################################################################################################################
 

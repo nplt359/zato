@@ -11,8 +11,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 # stdlib
 from datetime import datetime, timedelta
 from http.client import BAD_REQUEST, INTERNAL_SERVER_ERROR, NOT_FOUND, responses
-from json import loads
-from logging import getLogger
+from logging import DEBUG, getLogger
 from threading import current_thread
 from traceback import format_exc
 
@@ -33,29 +32,35 @@ from future.moves.urllib.parse import urlparse
 from past.builtins import basestring
 
 # Zato
-from zato.common import CHANNEL, DATA_FORMAT, ParsingException, PUBSUB, SEC_DEF_TYPE, WEB_SOCKET
-from zato.common.exception import Reportable
+from zato.common.api import CHANNEL, DATA_FORMAT, PUBSUB, SEC_DEF_TYPE, WEB_SOCKET
+from zato.common.audit_log import DataReceived, DataSent
+from zato.common.exception import ParsingException, Reportable
+from zato.common.json_internal import loads
 from zato.common.pubsub import HandleNewMessageCtx, MSG_PREFIX, PubSubMessage
-from zato.common.util import new_cid
+from zato.common.util.api import new_cid
 from zato.common.util.hook import HookTool
 from zato.common.util.wsx import cleanup_wsx_client
+from zato.common.vault_ import VAULT
 from zato.server.connection.connector import Connector
 from zato.server.connection.web_socket.msg import AuthenticateResponse, InvokeClientRequest, ClientMessage, copy_forbidden, \
      error_response, ErrorResponse, Forbidden, OKResponse, InvokeClientPubSubRequest
 from zato.server.pubsub.task import PubSubTool
-from zato.vault.client import VAULT
 
 # ################################################################################################################################
 
 if 0:
+    from zato.common.audit_log import DataEvent
     from zato.server.base.parallel import ParallelServer
 
+    DataEvent = DataEvent
     ParallelServer = ParallelServer
 
 # ################################################################################################################################
 
 logger = getLogger('zato_web_socket')
 logger_zato = getLogger('zato')
+
+logger_has_debug = logger.isEnabledFor(DEBUG)
 
 # ################################################################################################################################
 
@@ -65,6 +70,13 @@ http404_bytes = http404.encode('latin1')
 # ################################################################################################################################
 
 _wsgi_drop_keys = ('ws4py.socket', 'wsgi.errors', 'wsgi.input')
+
+# ################################################################################################################################
+
+class close_code:
+    runtime_invoke_client = 3701
+    runtime_background_ping = 3702
+    unhandled_error = 3703
 
 # ################################################################################################################################
 
@@ -82,6 +94,7 @@ hook_type_to_method = {
 # ################################################################################################################################
 
 _cannot_send = 'Cannot send on a terminated websocket'
+_audit_msg_type = WEB_SOCKET.AUDIT_KEY
 
 # ################################################################################################################################
 
@@ -135,7 +148,7 @@ class WebSocket(_WebSocket):
 
         super(WebSocket, self).__init__(_unusued_sock, _unusued_protocols, _unusued_extensions, wsgi_environ, **kwargs)
 
-    def _set_json_dump_func(self, _default='rapidjson', _supported=('rapidjson', 'bson')):
+    def _set_json_dump_func(self, _default='stdlib', _supported=('stdlib', 'rapidjson', 'bson')):
         json_library = self.parallel_server.fs_server_config.wsx.get('json_library', _default)
 
         if json_library not in _supported:
@@ -147,7 +160,10 @@ class WebSocket(_WebSocket):
 
             json_library = _default
 
-        if json_library == 'rapidjson':
+        if json_library == 'stdlib':
+            from json import dumps as dumps_func
+
+        elif json_library == 'rapidjson':
             from rapidjson import dumps as dumps_func
 
         elif json_library == 'bson':
@@ -181,6 +197,13 @@ class WebSocket(_WebSocket):
         self.pings_missed_threshold = self.config.get('pings_missed_threshold', 5)
         self.user_data = Bunch() # Arbitrary user-defined data
         self._disconnect_requested = False # Have we been asked to disconnect this client?
+
+        # Audit log configuration ..
+        self.is_audit_log_sent_active     = self.config.get('is_audit_log_sent_active')     # type: bool
+        self.is_audit_log_received_active = self.config.get('is_audit_log_received_active') # type: bool
+
+        # .. and audit log setup.
+        self.parallel_server.set_up_object_audit_log_by_config(_audit_msg_type, self.pub_client_id, self.config, False)
 
         # This will be populated by the on_vault_mount_point_needed hook
         self.vault_mount_point = None
@@ -362,10 +385,14 @@ class WebSocket(_WebSocket):
                     'last_seen': now,
                 }
 
-                logger.info('Setting pub/sub interaction metadata `%s`', pub_sub_request)
+                if logger_has_debug:
+                    logger.debug('Setting pub/sub interaction metadata `%s`', pub_sub_request)
+
                 self.invoke_service('zato.pubsub.subscription.update-interaction-metadata', pub_sub_request)
 
-                logger.info('Setting WSX last seen `%s`', wsx_request)
+                if logger_has_debug:
+                    logger.debug('Setting WSX last seen `%s`', wsx_request)
+
                 self.invoke_service('zato.channel.web-socket.client.set-last-seen', wsx_request)
 
                 # Finally, store it for the future use
@@ -584,7 +611,8 @@ class WebSocket(_WebSocket):
                 # Update peer name pretty now that we have more details about it
                 self.peer_conn_info_pretty = self.get_peer_info_pretty()
 
-                logger.info('Assigning wsx py:`%s` to `%s`', self.python_id, self.peer_conn_info_pretty)
+                logger.info('Assigning wsx py:`%s` to `%s` (%s %s)', self.python_id, self.pub_client_id,
+                    self.ext_client_id, self.ext_client_name)
 
             return AuthenticateResponse(self.token.value, request.cid, request.id).serialize(self._json_dump_func)
 
@@ -596,8 +624,13 @@ class WebSocket(_WebSocket):
             'Peer %s (%s) %s, closing its connection to %s (%s), cid:`%s` (%s)', self._peer_address, self._peer_fqdn, action,
             self._local_address, self.config.name, cid, self.peer_conn_info_pretty)
 
+        # If the client is already known to have disconnected there is no point in sending a Forbidden message.
+        if self.is_client_disconnected():
+            self.update_terminated_status()
+            return
+
         try:
-            self.send(Forbidden(cid, data).serialize(self._json_dump_func))
+            self.send(Forbidden(cid, data).serialize(self._json_dump_func), cid, None)
         except AttributeError as e:
             # Catch a lower-level exception which may be raised in case the client
             # disconnected and we did not manage to send the Forbidden message.
@@ -605,15 +638,26 @@ class WebSocket(_WebSocket):
             # with a specific message. Otherwise, we reraise the exception.
             if not e.args[0] == "'NoneType' object has no attribute 'text_message'":
                 raise
+        else:
+            self.update_terminated_status()
 
+# ################################################################################################################################
+
+    def update_terminated_status(self):
         self.server_terminated = True
         self.client_terminated = True
 
 # ################################################################################################################################
 
+    def is_client_disconnected(self):
+        return self.terminated or self.sock is None
+
+# ################################################################################################################################
+
     def send_background_pings(self, ping_extend=30):
 
-        logger.info('Starting WSX background pings for `%s`', self.peer_conn_info_pretty)
+        if logger_has_debug:
+            logger.debug('Starting WSX background pings for `%s`', self.peer_conn_info_pretty)
 
         try:
             while self.stream and (not self.server_terminated):
@@ -628,7 +672,7 @@ class WebSocket(_WebSocket):
                         response = self.invoke_client(new_cid(), None, use_send=False)
                     except RuntimeError:
                         logger.warn('Closing connection due to `%s`', format_exc())
-                        self.on_socket_terminated()
+                        self.on_socket_terminated(close_code.runtime_background_ping, 'Background ping runtime error')
 
                     with self.update_lock:
                         if response:
@@ -743,10 +787,10 @@ class WebSocket(_WebSocket):
             response = self.create_session(cid, request)
             if response:
                 self.register_auth_client()
-                self.send(response)
+                self.send(response, cid, None)
                 logger.info(
-                    'Client %s logged in successfully to %s (%s) (%s)', self.pub_client_id, self._local_address,
-                    self.config.name, self.peer_conn_info_pretty)
+                    'Client %s logged in successfully to %s (%s) (%s %s)', self.pub_client_id, self._local_address,
+                    self.config.name, self.ext_client_id, self.ext_client_name)
             else:
                 self.on_forbidden('sent invalid credentials')
         else:
@@ -827,11 +871,11 @@ class WebSocket(_WebSocket):
 
         serialized = response.serialize(self._json_dump_func)
 
-        logger.info('Sending response `%s` from to `%s` `%s` `%s` `%s` %s', serialized,
-            self.python_id, self.pub_client_id, self.ext_client_id, self.ext_client_name, self.peer_conn_info_pretty)
+        logger.info('Sending response `%s` to `%s` (%s %s)',
+            serialized, self.pub_client_id, self.ext_client_id, self.ext_client_name)
 
         try:
-            self.send(serialized)
+            self.send(serialized, msg.cid, cid)
         except AttributeError as e:
             if e.args[0] == "'NoneType' object has no attribute 'text_message'":
                 _msg = 'Service response discarded (client disconnected), cid:`%s`, msg.meta:`%s`'
@@ -901,7 +945,8 @@ class WebSocket(_WebSocket):
             now = _now()
             self.last_seen = now
 
-            logger.info('Request received cid:`%s`, client:`%s`', cid, self.pub_client_id)
+            if self.is_audit_log_received_active:
+                self._store_audit_log_data(DataReceived, data, cid)
 
             # If client is authenticated, allow it to re-authenticate, which grants a new token, or to invoke a service.
             # Otherwise, authentication is required.
@@ -938,7 +983,8 @@ class WebSocket(_WebSocket):
             else:
                 self.handle_create_session(cid, request)
 
-            logger.info('Response returned cid:`%s`, time:`%s`', cid, _now()-now)
+            if logger_has_debug:
+                logger.debug('Response returned cid:`%s`, time:`%s`', cid, _now() - now)
 
         except Exception:
             logger.warn(format_exc())
@@ -946,13 +992,41 @@ class WebSocket(_WebSocket):
 # ################################################################################################################################
 
     def received_message(self, message):
-        logger.info('Received message %r to `%s` from `%s` `%s` `%s` `%s`', message.data,
-            self.python_id, self.pub_client_id, self.ext_client_id, self.ext_client_name, self.peer_conn_info_pretty)
+
+        logger.info('Received message %r from `%s` (%s %s)', message.data,
+            self.pub_client_id, self.ext_client_id, self.ext_client_name)
 
         try:
             self._received_message(message.data)
         except Exception:
             logger.warn(format_exc())
+
+# ################################################################################################################################
+
+    def send(self, data='', cid=None, in_reply_to=None):
+
+        if self.is_audit_log_sent_active:
+            self._store_audit_log_data(DataSent, data, cid, in_reply_to)
+
+        # Call the super-class that will actually send the message.
+        super().send(data)
+
+# ################################################################################################################################
+
+    def _store_audit_log_data(self, event_class, data, cid, in_reply_to=None, _utcnow=datetime.utcnow):
+        # type: (DataEvent, str, str, str, object) -> None
+
+        # Describe our event ..
+        data_event = event_class()
+        data_event.type_ = _audit_msg_type
+        data_event.object_id = self.pub_client_id
+        data_event.data = data if isinstance(data, basestring) else str(data)
+        data_event.timestamp = _utcnow()
+        data_event.msg_id = cid
+        data_event.in_reply_to = in_reply_to
+
+        # .. and store it in the audit log.
+        self.parallel_server.audit_log.store_data(data_event)
 
 # ################################################################################################################################
 
@@ -1025,13 +1099,16 @@ class WebSocket(_WebSocket):
                 self.python_id, self.pub_client_id, self.ext_client_id, self.ext_client_name, self.peer_conn_info_pretty)
 
         try:
-            (self.send if use_send else self.ping)(serialized)
+            if use_send:
+                self.send(serialized, cid, msg.in_reply_to)
+            else:
+                self.ping(serialized)
         except RuntimeError as e:
             if str(e) == _cannot_send:
                 msg = 'Cannot send message (socket terminated #2), disconnecting client, cid:`%s`, msg:`%s` conn:`%s`'
                 logger.info(msg, cid, serialized, self.peer_conn_info_pretty)
                 logger_zato.info(msg, cid, serialized, self.peer_conn_info_pretty)
-                self.disconnect_client()
+                self.disconnect_client(cid, close_code.runtime_invoke_client, 'Client invocation runtime error')
                 raise Exception('WSX client disconnected cid:`{}, peer:`{}`'.format(cid, self.peer_conn_info_pretty))
             else:
                 raise
@@ -1055,30 +1132,35 @@ class WebSocket(_WebSocket):
         self.unregister_auth_client()
         del self.container.clients[self.pub_client_id]
 
+        # Unregister the client from audit log
+        if self.is_audit_log_sent_active or self.is_audit_log_received_active:
+            self.parallel_server.audit_log.delete_container(_audit_msg_type, self.pub_client_id)
+
 # ################################################################################################################################
 
-    def disconnect_client(self, _ignored_cid=None):
+    def disconnect_client(self, cid=None, code=None, reason=None):
         """ Disconnects the remote client, cleaning up internal resources along the way.
         """
         self._disconnect_requested = True
-        self._close_connection('Disconnecting client from')
-        self.close()
+        self._close_connection('cid:{}; c:{}; r:{}; Disconnecting client from')
+        self.close(code, reason)
 
 # ################################################################################################################################
 
     def opened(self):
-        logger.info('New connection from %s (%s) to %s (%s %s %s)', self._peer_address, self._peer_fqdn,
-            self._local_address, self.config.name, self.python_id, self.sock)
+        logger.info('New connection from %s (%s) to %s (%s %s) (%s %s) (%s)', self._peer_address, self._peer_fqdn,
+            self._local_address, self.config.name, self.python_id, self.forwarded_for, self.forwarded_for_fqdn,
+            self.pub_client_id)
 
         spawn(self._ensure_session_created)
 
 # ################################################################################################################################
 
-    def closed(self, _ignored_code=None, _ignored_reason=None):
+    def closed(self, code=None, reason=None):
 
         # Our self.disconnect_client must have cleaned up everything already
         if not self._disconnect_requested:
-            self._close_connection('Closing connection from')
+            self._close_connection('c:{}; r:{}; Client closed its connection from'.format(code, reason))
 
     on_socket_terminated = closed
 
@@ -1086,9 +1168,12 @@ class WebSocket(_WebSocket):
 
     def ponged(self, msg, _loads=loads, _action=WEB_SOCKET.ACTION.CLIENT_RESPONSE):
 
+        # Audit log comes first
+        if self.is_audit_log_received_active:
+            self._store_audit_log_data(DataReceived, msg.data, None)
+
         # Pretend it's an actual response from the client,
         # we cannot use in_reply_to because pong messages are 1:1 copies of ping ones.
-        # TODO: Use lxml for XML eventually but for now we are always using JSON
         self.responses_received[_loads(msg.data.decode('utf8'))['meta']['id']] = True
 
         # Since we received a pong response, it means that the peer is connected,
@@ -1106,7 +1191,7 @@ class WebSocket(_WebSocket):
         logger.info(_msg, peer_info, exc)
         logger_zato.info(_msg, peer_info, exc)
 
-        self.disconnect_client()
+        self.disconnect_client('<unhandled-error>', close_code.runtime_background_ping, 'Unhandled error caught')
 
     def close(self, code=1000, reason='', _msg='Error while closing connection from `%s`, e:`%s`'):
         """ Re-implemented from the base class to be able to catch exceptions in self._write when closing connections.
@@ -1197,7 +1282,10 @@ class WebSocketServer(WSGIServer):
     def stop(self, *args, **kwargs):
         """ Reimplemented from the parent class to be able to call shutdown prior to its calling self.socket.close.
         """
-        self.socket.shutdown(2) # SHUT_RDWR has value of 2 in 'man 2 shutdown'
+        # self.socket will exist only if we have previously successfully
+        # bound to an address. Otherwise, there will be no such attribute.
+        if hasattr(self, 'socket'):
+            self.socket.shutdown(2) # SHUT_RDWR has value of 2 in 'man 2 shutdown'
         super(WebSocketServer, self).stop(*args, **kwargs)
 
 # ################################################################################################################################

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Copyright (C) 2019, Zato Source s.r.o. https://zato.io
+Copyright (C) Zato Source s.r.o. https://zato.io
 
 Licensed under LGPLv3, see LICENSE.txt for terms and conditions.
 """
@@ -13,9 +13,10 @@ from django import forms
 
 # Python 2/3 compatibility
 from future.utils import iteritems
+from past.builtins import basestring
 
 # Zato
-from zato.common import DELEGATED_TO_RBAC, RATE_LIMIT, SIMPLE_IO, TLS, ZATO_NONE, ZATO_SEC_USE_RBAC
+from zato.common.api import AuditLog, DELEGATED_TO_RBAC, RATE_LIMIT, SIMPLE_IO, TLS, ZATO_NONE, ZATO_SEC_USE_RBAC
 
 # ################################################################################################################################
 
@@ -63,7 +64,7 @@ def add_select(form, field_name, elems, needs_initial_select=True, skip=None):
 
     for elem in elems:
 
-        if isinstance(elem, str):
+        if isinstance(elem, basestring):
             id = elem
             name = elem
         else:
@@ -141,7 +142,10 @@ def add_services(form, req, by_id=False, initial_service=None, api_name='zato.se
             if has_name_filter:
                 request['name_filter'] = '*'
 
-            for service in req.zato.client.invoke(api_name, request).data:
+            response = req.zato.client.invoke(api_name, request)
+            data = response.data
+
+            for service in data:
 
                 # Older parts of web-admin use service names only but newer ones prefer service ID
                 id_attr = service.id if by_id else service.name
@@ -294,6 +298,25 @@ class WithRateLimiting(forms.Form):
         super(WithRateLimiting, self).__init__(*args, **kwargs)
 
         add_select(self, 'rate_limit_type', RATE_LIMIT.TYPE(), needs_initial_select=False)
+
+# ################################################################################################################################
+# ################################################################################################################################
+
+class WithAuditLog(forms.Form):
+    is_audit_log_sent_active = forms.BooleanField(required=False, widget=forms.CheckboxInput())
+    is_audit_log_received_active = forms.BooleanField(required=False, widget=forms.CheckboxInput())
+
+    max_len_messages_sent = forms.CharField(
+        initial=AuditLog.Default.max_len_messages, widget=forms.TextInput(attrs={'style':'width:10%'}))
+
+    max_len_messages_received = forms.CharField(
+        initial=AuditLog.Default.max_len_messages, widget=forms.TextInput(attrs={'style':'width:10%'}))
+
+    max_bytes_per_message_sent = forms.CharField(
+        initial=AuditLog.Default.max_data_stored_per_message, widget=forms.TextInput(attrs={'style':'width:13%'}))
+
+    max_bytes_per_message_received = forms.CharField(
+        initial=AuditLog.Default.max_data_stored_per_message, widget=forms.TextInput(attrs={'style':'width:13%'}))
 
 # ################################################################################################################################
 # ################################################################################################################################
