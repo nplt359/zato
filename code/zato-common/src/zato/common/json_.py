@@ -63,7 +63,7 @@ def dumps(value, indent=4, expected=(str, dict, int, float, list, tuple, set)):
                 # We do not know how to serialize it
                 raise TypeError('Cannot serialize `{}` ({})'.format(value, type(value)))
 
-    return json_dumps(value, indent=indent)
+    return json_dumps(value, reject_bytes=False, indent=indent)
 
 # ################################################################################################################################
 

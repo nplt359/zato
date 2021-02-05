@@ -14,8 +14,7 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 # simdjson
 from simdjson import load, loads
 
-# uJSON
-from ujson import dump, dumps
+from zato.common.json_ import dump, dumps
 
 load = load
 dump = dump
