@@ -226,6 +226,8 @@ class Request(object):
         if is_sio:
 
             if self.payload:
+                if isinstance(self.payload, bytes):
+                    self.payload = self.payload.decode('utf8')
                 parsed = sio.parse_input(self.payload, data_format)
                 self.input.update(parsed)
 
