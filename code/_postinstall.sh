@@ -31,7 +31,7 @@ fi
 # Stamp the release hash.
 git log -n 1 --pretty=format:"%H" > ./release-info/revision.txt
 
-$PY_BINARY -m pip install -U setuptools pip
+$PY_BINARY -m pip install -U 'setuptools<58' pip
 
 # SciPy builds require NumPy available in setup.py, so install it separately.
 $PY_BINARY -m pip install numpy==1.14.0
