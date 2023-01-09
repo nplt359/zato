@@ -1,8 +1,8 @@
-https://github.com/dsuch/zato-ext-bunch/archive/master.zip#egg=bunch
+https://github.com/dsuch/zato-ext-bunch/archive/master.zip#egg=zato-ext-bunch
 fs==2.2.1
 librabbitmq==2.0.0
 odoo-client-lib==1.2.0
-https://github.com/dsuch/zato-ext-paodate/archive/master.zip#egg=paodate
+https://github.com/dsuch/zato-ext-paodate/archive/master.zip#egg=zato-ext-paodate
 Paste==3.0.6
 pg8000==1.13.1
 pyaml==18.11.0
